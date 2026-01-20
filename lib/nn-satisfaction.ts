@@ -1,6 +1,6 @@
 // lib/nn-satisfaction.ts
 
-import { TrainingResult, TrainingPoint } from './types';
+import type { ActivationFn, TrainingPoint, TrainingResult } from './types';
 
 /**
  * PRNG local (determinista con seed).
@@ -17,23 +17,86 @@ function mulberry32(seed: number) {
 }
 
 /**
+ * Dataset del ejercicio de satisfacción.
+ * Lo exportamos para poder:
+ * - dibujar los puntos en 2D
+ * - mostrar frontera de decisión
+ * - explicar separabilidad / escalas
+ */
+export function getSatisfactionDataset(): { X: [number, number][], y: number[] } {
+  const X: [number, number][] = [
+    [2, 5],
+    [10, 4],
+    [25, 2],
+    [30, 1],
+    [5, 4],
+  ];
+
+  const y: number[] = [1, 1, 0, 0, 1];
+  return { X, y };
+}
+
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+function tanh(x: number): number {
+  return Math.tanh(x);
+}
+function relu(x: number): number {
+  return x > 0 ? x : 0;
+}
+
+function activationForward(z: number, fn: ActivationFn): number {
+  switch (fn) {
+    case 'tanh':
+      return tanh(z);
+    case 'relu':
+      return relu(z);
+    case 'sigmoid':
+    default:
+      return sigmoid(z);
+  }
+}
+
+function activationDerivative(z: number, yHat: number, fn: ActivationFn): number {
+  switch (fn) {
+    case 'tanh':
+      return 1 - yHat * yHat;
+    case 'relu':
+      return z > 0 ? 1 : 0;
+    case 'sigmoid':
+    default:
+      return yHat * (1 - yHat);
+  }
+}
+
+/**
  * Entrena un modelo de red neuronal muy simple (una sola neurona)
  * para clasificar niveles de satisfacción.
  *
  * Este ejercicio es educativo: muestra forward pass, error, gradiente
  * y actualización de pesos/bias con gradiente descendente.
+ *
+ * Novedades para el laboratorio:
+ * - activación configurable (sigmoid/tanh/relu)
+ * - history con snapshots (weights/bias/z/yHat) para animación y sliders
+ * - dataset exportable para frontera de decisión y puntos 2D
  */
 export function trainSatisfaction(options?: {
   learningRate?: number; // Tasa de aprendizaje
   epochs?: number; // Número de épocas
   logEvery?: number; // Cada cuántas épocas guardar un punto en history
   seed?: number; // Semilla opcional para reproducibilidad
+
+  /** Activación para experimentar/enseñar (default: sigmoid). */
+  activation?: ActivationFn;
 }): TrainingResult {
   const {
     learningRate: learningRateRaw = 0.01,
     epochs: epochsRaw = 2_000, // default amigable para UI/visualizaciones
     logEvery: logEveryRaw = 100,
     seed,
+    activation = 'sigmoid',
   } = options || {};
 
   // Validaciones suaves (evita NaN / negativos)
@@ -49,22 +112,10 @@ export function trainSatisfaction(options?: {
   // Determinismo opcional, sin tocar Math.random global
   const rand = seed !== undefined ? mulberry32(seed) : Math.random;
 
-  // Funciones auxiliares
-  const sigmoid = (x: number): number => 1 / (1 + Math.exp(-x));
-  const sigmoidDerivative = (yHat: number): number => yHat * (1 - yHat);
-
-  // Datos de entrenamiento
-  // Nota didáctica: el comentario original decía "normalizados", pero estos valores NO están normalizados.
-  // Puedes convertir esto en lección: escalas distintas afectan el entrenamiento y la magnitud de los pesos.
-  const X: number[][] = [
-    [2, 5],
-    [10, 4],
-    [25, 2],
-    [30, 1],
-    [5, 4],
-  ];
-
-  const y: number[] = [1, 1, 0, 0, 1];
+  // Dataset (exportable)
+  // Nota didáctica: estos valores NO están normalizados.
+  // Esto puede usarse como lección: escalas distintas afectan la magnitud de los pesos.
+  const { X, y } = getSatisfactionDataset();
 
   // Inicialización de parámetros (con rand local)
   const w = [rand(), rand()];
@@ -85,17 +136,18 @@ export function trainSatisfaction(options?: {
 
       // Forward pass
       const z = x1 * w[0] + x2 * w[1] + b;
-      const yHat = sigmoid(z);
+      const yHat = activationForward(z, activation);
 
       lastZ = z;
       lastYHat = yHat;
 
-      // Error
+      // Error (MSE educativo)
       const error = y[i] - yHat;
 
-      // Gradiente (demo simple: MSE + sigmoide)
+      // Gradiente (cadena: error * f'(z))
       // En clasificación real suele usarse cross-entropy, pero MSE funciona para visualización educativa.
-      const gradient = error * sigmoidDerivative(yHat);
+      const gradAct = activationDerivative(z, yHat, activation);
+      const gradient = error * gradAct;
 
       // Update
       w[0] += learningRate * gradient * x1;
@@ -120,7 +172,8 @@ export function trainSatisfaction(options?: {
 
   // Evaluación final
   const testInput: [number, number] = [12, 3];
-  const pred = sigmoid(testInput[0] * w[0] + testInput[1] * w[1] + b);
+  const testZ = testInput[0] * w[0] + testInput[1] * w[1] + b;
+  const pred = activationForward(testZ, activation);
 
   return {
     weights: [w[0], w[1]], // snapshot defensivo (evita mutaciones accidentales)

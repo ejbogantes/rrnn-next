@@ -1,8 +1,6 @@
 // lib/nn-sales.ts
 
-// Importamos los tipos de datos que definen la estructura del resultado y del historial.
-// Esto permite mantener consistencia entre distintos modelos (ventas, satisfacción, etc.).
-import { TrainingResult, TrainingPoint } from './types';
+import type { ActivationFn, TrainingPoint, TrainingResult } from './types';
 
 /**
  * PRNG local (determinista con seed).
@@ -19,32 +17,92 @@ function mulberry32(seed: number) {
 }
 
 /**
+ * Dataset del ejercicio de ventas.
+ * Lo exportamos para poder:
+ * - dibujar los puntos en 2D
+ * - mostrar frontera de decisión
+ * - explicar separabilidad
+ */
+export function getSalesDataset(): { X: [number, number][], y: number[] } {
+    const X: [number, number][] = [
+        [2, 10],
+        [3, 15],
+        [5, 20],
+        [1, 5],
+        [4, 18],
+        [0.5, 3],
+    ];
+    const y: number[] = [0, 1, 1, 0, 1, 0];
+    return { X, y };
+}
+
+function sigmoid(x: number): number {
+    return 1 / (1 + Math.exp(-x));
+}
+function tanh(x: number): number {
+    return Math.tanh(x);
+}
+function relu(x: number): number {
+    return x > 0 ? x : 0;
+}
+
+/**
+ * Derivadas (en términos de salida cuando conviene):
+ * - sigmoid': yHat * (1 - yHat)
+ * - tanh': 1 - yHat^2
+ * - relu': z > 0 ? 1 : 0
+ */
+function activationForward(z: number, fn: ActivationFn): number {
+    switch (fn) {
+        case 'tanh':
+            return tanh(z);
+        case 'relu':
+            return relu(z);
+        case 'sigmoid':
+        default:
+            return sigmoid(z);
+    }
+}
+
+function activationDerivative(z: number, yHat: number, fn: ActivationFn): number {
+    switch (fn) {
+        case 'tanh':
+            return 1 - yHat * yHat;
+        case 'relu':
+            return z > 0 ? 1 : 0;
+        case 'sigmoid':
+        default:
+            return yHat * (1 - yHat);
+    }
+}
+
+/**
  * Entrena un modelo neuronal extremadamente simple (una sola neurona)
- * para predecir la probabilidad de éxito en ventas según características básicas.
+ * para predecir la salida según dos características.
  *
- * Este ejemplo está diseñado con fines educativos,
- * explicando paso a paso el flujo de entrenamiento con gradiente descendente.
- *
- * @param options Configuración opcional del entrenamiento.
- * @returns TrainingResult con pesos, sesgo, predicción y evolución del error.
+ * Diseñado para visualización educativa:
+ * - history muestreado con logEvery
+ * - snapshots de weights/bias/z/yHat para animación y sliders
+ * - activación configurable (sigmoid/tanh/relu) para comparación A/B
  */
 export function trainSales(options?: {
-    learningRate?: number; // Tasa de aprendizaje (cuánto ajustamos los pesos cada paso)
-    epochs?: number;       // Número total de iteraciones del entrenamiento
-    logEvery?: number;     // Cada cuántas épocas se guarda info en el historial
-    seed?: number;         // Semilla opcional para reproducibilidad
+    learningRate?: number;
+    epochs?: number;
+    logEvery?: number;
+    seed?: number;
+
+    /** Activación para experimentar/enseñar (default: sigmoid). */
+    activation?: ActivationFn;
 }): TrainingResult {
-    // --- Parámetros configurables con valores por defecto ---
-    // Nota pedagógica: para visualizaciones interactivas, 15k por defecto suele ser mucho.
-    // Dejamos un default más ligero y el caller puede pedir más si lo necesita.
     const {
         learningRate: learningRateRaw = 0.01,
         epochs: epochsRaw = 2_000,
         logEvery: logEveryRaw = 100,
         seed,
+        activation = 'sigmoid',
     } = options || {};
 
-    // Validaciones suaves: evitan NaN / negativos / valores absurdos que rompan la UI.
+    // Validaciones suaves: evitan NaN / negativos / valores absurdos
     const learningRate =
         Number.isFinite(learningRateRaw) && learningRateRaw > 0 ? learningRateRaw : 0.01;
 
@@ -54,95 +112,55 @@ export function trainSales(options?: {
         ? Math.max(1, Math.floor(logEveryRaw))
         : 100;
 
-    // --- Determinismo opcional ---
-    // Si hay seed, usamos un PRNG local determinista; si no, usamos Math.random normal.
+    // Determinismo opcional (sin tocar Math.random global)
     const rand = seed !== undefined ? mulberry32(seed) : Math.random;
 
-    // --- Funciones auxiliares ---
-    // Sigmoide: función de activación que transforma valores numéricos en [0, 1].
-    const sigmoid = (x: number): number => 1 / (1 + Math.exp(-x));
+    // Dataset
+    const { X, y } = getSalesDataset();
 
-    // Derivada de la sigmoide: usada para calcular el gradiente.
-    // Nota: aquí la derivada se expresa en función de yHat para ahorrar cómputo.
-    const sigmoidDerivative = (yHat: number): number => yHat * (1 - yHat);
-
-    // --- Datos de entrenamiento ---
-    // X representa pares [presupuesto, leads] o cualquier variable de entrada.
-    // y indica si la venta fue exitosa (1) o no (0).
-    const X: number[][] = [
-        [2, 10],
-        [3, 15],
-        [5, 20],
-        [1, 5],
-        [4, 18],
-        [0.5, 3],
-    ];
-
-    const y: number[] = [0, 1, 1, 0, 1, 0];
-
-    // --- Inicialización de parámetros ---
-    // Pesos iniciales aleatorios. Se usa const porque la referencia no cambia.
+    // Inicialización
     const w = [rand(), rand()];
-
-    // Sesgo (bias), ajustable durante el entrenamiento.
     let b = rand();
 
-    // Historial para graficar / animar la evolución.
     const history: TrainingPoint[] = [];
 
-    // --- Bucle de entrenamiento principal ---
     for (let epoch = 0; epoch < epochs; epoch++) {
-        let totalError = 0; // Error acumulado de la época.
+        let totalError = 0;
 
-        // Guardamos un "snapshot" representativo por época (del último sample visto).
-        // Esto es útil para visualización (z/yHat) sin inflar el history por cada sample.
+        // Snapshot representativo (último sample)
         let lastZ = 0;
         let lastYHat = 0;
 
-        // Recorremos todos los ejemplos de entrenamiento.
         for (let i = 0; i < X.length; i++) {
-            // Desestructuramos las dos variables de entrada (x1, x2).
             const [x1, x2] = X[i];
 
-            // Paso 1: Forward pass (propagación hacia adelante)
-            // Combinamos las entradas ponderadas más el sesgo.
+            // Forward pass
             const z = x1 * w[0] + x2 * w[1] + b;
+            const yHat = activationForward(z, activation);
 
-            // Aplicamos la función sigmoide → salida entre 0 y 1.
-            const yHat = sigmoid(z);
-
-            // Snapshot para visualización
             lastZ = z;
             lastYHat = yHat;
 
-            // Paso 2: Cálculo del error
-            // Diferencia entre la salida real y la predicha.
+            // Error (MSE educativo)
             const error = y[i] - yHat;
 
-            // Paso 3: Gradiente descendente
-            // Nota educativa: estamos usando MSE con sigmoide por simplicidad visual.
-            // (En clasificación, típicamente se usa cross-entropy, pero MSE sirve para un demo.)
-            const gradient = error * sigmoidDerivative(yHat);
+            // Gradiente (cadena: error * f'(z))
+            const gradAct = activationDerivative(z, yHat, activation);
+            const gradient = error * gradAct;
 
-            // Paso 4: Actualización de los pesos y el sesgo
+            // Update
             w[0] += learningRate * gradient * x1;
             w[1] += learningRate * gradient * x2;
             b += learningRate * gradient;
 
-            // Acumulamos el error cuadrático medio (MSE parcial)
             totalError += Math.pow(error, 2);
         }
 
-        // Cada logEvery épocas, guardamos el error promedio + estado del modelo.
-        // Esto permite:
-        // - graficar error
-        // - slider por epoch
-        // - animar cambio de pesos/bias/activación
         if (epoch % logEvery === 0) {
             history.push({
                 epoch,
                 error: totalError / X.length,
-                weights: [w[0], w[1]], // snapshot (evita mutación accidental)
+                weights: [w[0], w[1]],
                 bias: b,
                 z: lastZ,
                 yHat: lastYHat,
@@ -150,16 +168,13 @@ export function trainSales(options?: {
         }
     }
 
-    // --- Evaluación final ---
-    // Probamos el modelo con un ejemplo nuevo.
-    // Nota: si luego normalizas X, este input también debe normalizarse.
+    // Evaluación final (ejemplo de prueba)
     const testInput: [number, number] = [3.5, 12];
-    const pred = sigmoid(testInput[0] * w[0] + testInput[1] * w[1] + b);
+    const testZ = testInput[0] * w[0] + testInput[1] * w[1] + b;
+    const pred = activationForward(testZ, activation);
 
-    // --- Resultado ---
-    // Retornamos el modelo entrenado y los datos del entrenamiento.
     return {
-        weights: [w[0], w[1]], // snapshot final (evita exponer referencia mutable)
+        weights: [w[0], w[1]],
         bias: b,
         prediction: pred,
         history,

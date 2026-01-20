@@ -3,6 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { trainSatisfaction } from '@/lib/nn-satisfaction';
 import { trainSales } from '@/lib/nn-sales';
+import type { ActivationFn, ExperimentConfig, ExperimentResult, TrainMeta } from '@/lib/types';
 
 /**
  * API: /api/train
@@ -10,6 +11,11 @@ import { trainSales } from '@/lib/nn-sales';
  * Endpoint educativo para entrenar modelos neuronales simples.
  * Permite experimentar con hiperparámetros y observar el proceso de aprendizaje
  * de forma controlada y reproducible.
+ *
+ * ✅ Nuevo:
+ * - soporte de activation: sigmoid | tanh | relu
+ * - respuesta "modo laboratorio" (experiment: { config, meta, result })
+ * - mantiene compatibilidad con el response anterior (model/hyperparameters/result)
  */
 export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
@@ -23,28 +29,48 @@ export async function GET(req: NextRequest) {
         ? (modelParam as 'sales' | 'satisfaction')
         : 'satisfaction';
 
+    // Activación permitida
+    const allowedActivations = new Set<ActivationFn>(['sigmoid', 'tanh', 'relu']);
+    const activationParam = (searchParams.get('activation') || 'sigmoid') as ActivationFn;
+    const activation: ActivationFn = allowedActivations.has(activationParam)
+        ? activationParam
+        : 'sigmoid';
+
     // Epochs: límites razonables para UX (evita bloquear la UI)
     const epochsRaw = parseInt(searchParams.get('epochs') || '2000', 10);
-    const epochs = Number.isFinite(epochsRaw)
-        ? Math.min(Math.max(1, epochsRaw), 50_000)
-        : 2000;
+    const epochs = Number.isFinite(epochsRaw) ? Math.min(Math.max(1, epochsRaw), 50_000) : 2000;
 
     // Learning rate: debe ser positivo y finito
     const learningRateRaw = parseFloat(searchParams.get('learningRate') || '0.01');
     const learningRate =
-        Number.isFinite(learningRateRaw) && learningRateRaw > 0
-            ? learningRateRaw
-            : 0.01;
+        Number.isFinite(learningRateRaw) && learningRateRaw > 0 ? learningRateRaw : 0.01;
 
     // Seed opcional para reproducibilidad (si no es válido, se ignora)
     const seedRaw = searchParams.get('seed');
-    const seed = seedRaw !== null && !Number.isNaN(parseInt(seedRaw, 10))
-        ? parseInt(seedRaw, 10)
-        : undefined;
+    const seed =
+        seedRaw !== null && !Number.isNaN(parseInt(seedRaw, 10)) ? parseInt(seedRaw, 10) : undefined;
 
     // Control de densidad del history (ideal para sliders y animaciones)
     // Ej: ~200 puntos máximo en la gráfica
     const logEvery = Math.max(1, Math.floor(epochs / 200));
+
+    // Config del experimento (para export/import, A/B, etc.)
+    const config: ExperimentConfig = {
+        model,
+        epochs,
+        learningRate,
+        activation,
+        seed,
+    };
+
+    // Meta del experimento (lo que realmente se usó)
+    const meta: TrainMeta = {
+        epochs,
+        learningRate,
+        activation,
+        seed,
+        logEvery,
+    };
 
     try {
         let result;
@@ -57,6 +83,7 @@ export async function GET(req: NextRequest) {
                     learningRate,
                     seed,
                     logEvery,
+                    activation,
                 });
                 break;
 
@@ -67,22 +94,42 @@ export async function GET(req: NextRequest) {
                     learningRate,
                     seed,
                     logEvery,
+                    activation,
                 });
                 break;
         }
 
-        // --- Respuesta enriquecida (didáctica) ---
-        // No solo devolvemos el resultado, sino también el contexto del entrenamiento.
-        return NextResponse.json({
-            model,
-            hyperparameters: {
-                epochs,
-                learningRate,
-                seed,
-                logEvery,
-            },
+        const experiment: ExperimentResult = {
+            config,
+            meta,
             result,
-        });
+        };
+
+        // --- Respuesta enriquecida (didáctica) ---
+        // Mantiene compatibilidad con la UI existente:
+        // - model/hyperparameters/result (antiguo)
+        // + experiment (nuevo)
+        return NextResponse.json(
+            {
+                // ✅ Compatibilidad con tu page.tsx actual
+                model,
+                hyperparameters: {
+                    epochs,
+                    learningRate,
+                    activation,
+                    seed,
+                    logEvery,
+                },
+                result,
+
+                // ✅ Nuevo: “modo laboratorio”
+                experiment,
+            },
+            {
+                // Evita caching accidental (importante en demos)
+                headers: { 'Cache-Control': 'no-store' },
+            }
+        );
     } catch (error: unknown) {
         if (error instanceof Error) {
             console.error('Error al entrenar el modelo:', error.message);
@@ -92,7 +139,7 @@ export async function GET(req: NextRequest) {
 
         return NextResponse.json(
             { error: 'Error durante el entrenamiento del modelo.' },
-            { status: 500 }
+            { status: 500, headers: { 'Cache-Control': 'no-store' } }
         );
     }
 }
