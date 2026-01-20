@@ -5,6 +5,20 @@
 import { TrainingResult, TrainingPoint } from './types';
 
 /**
+ * PRNG local (determinista con seed).
+ * Importante: NO sobrescribe Math.random (evita side-effects globales).
+ */
+function mulberry32(seed: number) {
+    let t = seed >>> 0;
+    return () => {
+        t += 0x6D2B79F5;
+        let x = Math.imul(t ^ (t >>> 15), 1 | t);
+        x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
+        return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+/**
  * Entrena un modelo neuronal extremadamente simple (una sola neurona)
  * para predecir la probabilidad de éxito en ventas según características básicas.
  *
@@ -16,34 +30,40 @@ import { TrainingResult, TrainingPoint } from './types';
  */
 export function trainSales(options?: {
     learningRate?: number; // Tasa de aprendizaje (cuánto ajustamos los pesos cada paso)
-    epochs?: number;        // Número total de iteraciones del entrenamiento
-    logEvery?: number;      // Cada cuántas épocas se guarda el error en el historial
-    seed?: number;          // Semilla opcional para reproducibilidad
+    epochs?: number;       // Número total de iteraciones del entrenamiento
+    logEvery?: number;     // Cada cuántas épocas se guarda info en el historial
+    seed?: number;         // Semilla opcional para reproducibilidad
 }): TrainingResult {
-
     // --- Parámetros configurables con valores por defecto ---
+    // Nota pedagógica: para visualizaciones interactivas, 15k por defecto suele ser mucho.
+    // Dejamos un default más ligero y el caller puede pedir más si lo necesita.
     const {
-        learningRate = 0.01,
-        epochs = 15_000,
-        logEvery = 100,
+        learningRate: learningRateRaw = 0.01,
+        epochs: epochsRaw = 2_000,
+        logEvery: logEveryRaw = 100,
         seed,
     } = options || {};
 
+    // Validaciones suaves: evitan NaN / negativos / valores absurdos que rompan la UI.
+    const learningRate =
+        Number.isFinite(learningRateRaw) && learningRateRaw > 0 ? learningRateRaw : 0.01;
+
+    const epochs = Number.isFinite(epochsRaw) ? Math.max(1, Math.floor(epochsRaw)) : 2_000;
+
+    const logEvery = Number.isFinite(logEveryRaw)
+        ? Math.max(1, Math.floor(logEveryRaw))
+        : 100;
+
     // --- Determinismo opcional ---
-    // Si se proporciona una semilla, reemplazamos Math.random por una función determinista.
-    if (seed !== undefined) {
-        let s = seed;
-        Math.random = () => {
-            const x = Math.sin(s++) * 10_000;
-            return x - Math.floor(x);
-        };
-    }
+    // Si hay seed, usamos un PRNG local determinista; si no, usamos Math.random normal.
+    const rand = seed !== undefined ? mulberry32(seed) : Math.random;
 
     // --- Funciones auxiliares ---
     // Sigmoide: función de activación que transforma valores numéricos en [0, 1].
     const sigmoid = (x: number): number => 1 / (1 + Math.exp(-x));
 
     // Derivada de la sigmoide: usada para calcular el gradiente.
+    // Nota: aquí la derivada se expresa en función de yHat para ahorrar cómputo.
     const sigmoidDerivative = (yHat: number): number => yHat * (1 - yHat);
 
     // --- Datos de entrenamiento ---
@@ -62,17 +82,22 @@ export function trainSales(options?: {
 
     // --- Inicialización de parámetros ---
     // Pesos iniciales aleatorios. Se usa const porque la referencia no cambia.
-    const w = [Math.random(), Math.random()];
+    const w = [rand(), rand()];
 
     // Sesgo (bias), ajustable durante el entrenamiento.
-    let b = Math.random();
+    let b = rand();
 
-    // Historial del error para graficar la evolución.
+    // Historial para graficar / animar la evolución.
     const history: TrainingPoint[] = [];
 
     // --- Bucle de entrenamiento principal ---
     for (let epoch = 0; epoch < epochs; epoch++) {
         let totalError = 0; // Error acumulado de la época.
+
+        // Guardamos un "snapshot" representativo por época (del último sample visto).
+        // Esto es útil para visualización (z/yHat) sin inflar el history por cada sample.
+        let lastZ = 0;
+        let lastYHat = 0;
 
         // Recorremos todos los ejemplos de entrenamiento.
         for (let i = 0; i < X.length; i++) {
@@ -86,12 +111,17 @@ export function trainSales(options?: {
             // Aplicamos la función sigmoide → salida entre 0 y 1.
             const yHat = sigmoid(z);
 
+            // Snapshot para visualización
+            lastZ = z;
+            lastYHat = yHat;
+
             // Paso 2: Cálculo del error
             // Diferencia entre la salida real y la predicha.
             const error = y[i] - yHat;
 
             // Paso 3: Gradiente descendente
-            // Calculamos cuánto debe ajustarse cada parámetro.
+            // Nota educativa: estamos usando MSE con sigmoide por simplicidad visual.
+            // (En clasificación, típicamente se usa cross-entropy, pero MSE sirve para un demo.)
             const gradient = error * sigmoidDerivative(yHat);
 
             // Paso 4: Actualización de los pesos y el sesgo
@@ -103,26 +133,35 @@ export function trainSales(options?: {
             totalError += Math.pow(error, 2);
         }
 
-        // Cada logEvery épocas, guardamos el error promedio.
+        // Cada logEvery épocas, guardamos el error promedio + estado del modelo.
+        // Esto permite:
+        // - graficar error
+        // - slider por epoch
+        // - animar cambio de pesos/bias/activación
         if (epoch % logEvery === 0) {
             history.push({
                 epoch,
                 error: totalError / X.length,
+                weights: [w[0], w[1]], // snapshot (evita mutación accidental)
+                bias: b,
+                z: lastZ,
+                yHat: lastYHat,
             });
         }
     }
 
     // --- Evaluación final ---
     // Probamos el modelo con un ejemplo nuevo.
-    const testInput = [3.5, 12];
+    // Nota: si luego normalizas X, este input también debe normalizarse.
+    const testInput: [number, number] = [3.5, 12];
     const pred = sigmoid(testInput[0] * w[0] + testInput[1] * w[1] + b);
 
     // --- Resultado ---
     // Retornamos el modelo entrenado y los datos del entrenamiento.
     return {
-        weights: w,       // Pesos finales aprendidos
-        bias: b,          // Sesgo final
-        prediction: pred, // Predicción sobre el ejemplo de prueba
-        history,          // Evolución del error
+        weights: [w[0], w[1]], // snapshot final (evita exponer referencia mutable)
+        bias: b,
+        prediction: pred,
+        history,
     };
 }
